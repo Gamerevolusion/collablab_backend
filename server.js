@@ -9,21 +9,14 @@ const wss = new WebSocketServer({ server });
 
 const lobbies = {};
 
-// Create a temp folder to hold the code files being run
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
-/**
- * Sanitize a student ID to prevent path traversal.
- * Strips anything that isn't alphanumeric, dash, or underscore.
- */
+// Sanitize student ID to prevent path traversal
 function sanitizeId(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-/**
- * Broadcast a message to all students in a lobby.
- */
 function broadcastToStudents(lobbyCode, message) {
   if (!lobbies[lobbyCode]) return;
   const packet = JSON.stringify(message);
@@ -43,7 +36,6 @@ wss.on('connection', (ws) => {
       const packet = JSON.parse(message);
       const { type, lobbyCode, payload } = packet;
 
-      // --- 1. LOBBY JOIN ---
       if (type === 'JOIN_ROOM') {
         const { rollNumber, role } = payload;
 
@@ -72,7 +64,6 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // --- 2. CRDT SYNC STREAMING ---
       if (type === 'SYNC_UPDATE') {
         if (!currentLobby || !lobbies[currentLobby]) return;
         if (userSession.role === 'student') {
@@ -86,7 +77,6 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // --- 3. HAND RAISE ---
       if (type === 'HAND_RAISE') {
         if (!currentLobby || !lobbies[currentLobby]) return;
         if (userSession.role === 'student') {
@@ -100,12 +90,10 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // --- 4. HAND LOWER (from professor acknowledging or student lowering) ---
       if (type === 'HAND_LOWER') {
         if (!currentLobby || !lobbies[currentLobby]) return;
         const targetRoll = sanitizeId(payload.rollNumber);
 
-        // If professor acknowledges, notify the student
         if (userSession.role === 'professor') {
           const studentSocket = lobbies[currentLobby].students[targetRoll];
           if (studentSocket && studentSocket.readyState === 1) {
@@ -115,7 +103,7 @@ wss.on('connection', (ws) => {
             }));
           }
         }
-        // If student lowers their own hand, notify the professor
+
         if (userSession.role === 'student') {
           const profSocket = lobbies[currentLobby].professor;
           if (profSocket && profSocket.readyState === 1) {
@@ -127,12 +115,11 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // --- 5. NATIVE CODE EXECUTION ---
       if (type === 'EXECUTE_CODE') {
         if (!currentLobby || userSession.role !== 'student') return;
 
         const { language, code } = payload;
-        const safeId = userSession.rollNumber; // already sanitized at join
+        const safeId = userSession.rollNumber;
 
         let command = '';
         let fileName = '';
@@ -151,10 +138,8 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        // Write the student's code to a temp file
         fs.writeFileSync(fileName, code);
 
-        // Execute with a timeout
         exec(command, { timeout: 5000 }, (error, stdout, stderr) => {
           const output = error ? (stderr || error.message) : stdout;
 
@@ -163,10 +148,8 @@ wss.on('connection', (ws) => {
             payload: { rollNumber: safeId, output: output || 'Program finished with no output.' }
           });
 
-          // Send output back to the student
           ws.send(resultPacket);
 
-          // Stream to Professor
           if (lobbies[currentLobby]) {
             const profSocket = lobbies[currentLobby].professor;
             if (profSocket && profSocket.readyState === 1) {
@@ -174,7 +157,6 @@ wss.on('connection', (ws) => {
             }
           }
 
-          // Cleanup temp file
           fs.unlink(fileName, () => {});
         });
       }
@@ -188,7 +170,6 @@ wss.on('connection', (ws) => {
     if (!currentLobby || !lobbies[currentLobby]) return;
 
     if (userSession && userSession.role === 'student') {
-      // Notify professor that student disconnected
       delete lobbies[currentLobby].students[userSession.rollNumber];
       if (lobbies[currentLobby].professor && lobbies[currentLobby].professor.readyState === 1) {
         lobbies[currentLobby].professor.send(JSON.stringify({
@@ -197,7 +178,6 @@ wss.on('connection', (ws) => {
         }));
       }
     } else if (userSession && userSession.role === 'professor') {
-      // Professor disconnected — notify all students and clean up the lobby
       console.log(`Professor left lobby: ${currentLobby}`);
       broadcastToStudents(currentLobby, {
         type: 'ERROR',
