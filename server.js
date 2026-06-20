@@ -125,6 +125,19 @@ wss.on('connection', (ws) => {
         }
       }
 
+      if (type === 'PASTE_DETECTED') {
+        if (!currentLobby || !lobbies[currentLobby]) return;
+        if (userSession.role === 'student') {
+          const profSocket = lobbies[currentLobby].professor;
+          if (profSocket && profSocket.readyState === 1) {
+            profSocket.send(JSON.stringify({
+              type: 'PASTE_DETECTED',
+              payload: { rollNumber: userSession.rollNumber, charCount: payload.charCount, timestamp: Date.now() }
+            }));
+          }
+        }
+      }
+
       if (type === 'EXECUTE_CODE') {
         if (!currentLobby || userSession.role !== 'student') return;
 
