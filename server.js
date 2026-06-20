@@ -115,6 +115,16 @@ wss.on('connection', (ws) => {
         }
       }
 
+      if (type === 'ANNOUNCEMENT') {
+        if (!currentLobby || !lobbies[currentLobby]) return;
+        if (userSession.role === 'professor') {
+          broadcastToStudents(currentLobby, {
+            type: 'ANNOUNCEMENT',
+            payload: { message: payload.message, timestamp: Date.now() }
+          });
+        }
+      }
+
       if (type === 'EXECUTE_CODE') {
         if (!currentLobby || userSession.role !== 'student') return;
 
