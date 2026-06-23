@@ -12,7 +12,6 @@ const lobbies = {};
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
-// Sanitize student ID to prevent path traversal
 function sanitizeId(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
 }
@@ -21,9 +20,73 @@ function broadcastToStudents(lobbyCode, message) {
   if (!lobbies[lobbyCode]) return;
   const packet = JSON.stringify(message);
   Object.values(lobbies[lobbyCode].students).forEach(studentWs => {
-    if (studentWs.readyState === 1) { // WebSocket.OPEN
+    if (studentWs.readyState === 1) {
       studentWs.send(packet);
     }
+  });
+}
+
+const PISTON_URL = 'https://emkc.org/api/v2/piston/execute';
+
+const PISTON_LANGS = {
+  c: { language: 'c', version: '10.2.0', filename: 'main.c' },
+  cpp: { language: 'c++', version: '10.2.0', filename: 'main.cpp' },
+  r: { language: 'r', version: '4.1.1', filename: 'main.r' },
+  sql: { language: 'sqlite3', version: '3.36.0', filename: 'main.sql' },
+};
+
+async function executeViaPiston(language, code) {
+  const config = PISTON_LANGS[language];
+  if (!config) return { output: `Language '${language}' is not supported via Piston.` };
+
+  try {
+    const response = await fetch(PISTON_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        language: config.language,
+        version: config.version,
+        files: [{ name: config.filename, content: code }],
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { output: `Piston API error (${response.status}): ${text}` };
+    }
+
+    const result = await response.json();
+    const runOutput = result.run || {};
+    if (runOutput.stderr && runOutput.stderr.trim()) {
+      return { output: runOutput.stderr };
+    }
+    return { output: runOutput.stdout || 'Program finished with no output.' };
+  } catch (err) {
+    return { output: `Execution service unavailable: ${err.message}. Try Python or JavaScript (runs locally).` };
+  }
+}
+
+function executeLocally(language, code, safeId, callback) {
+  let command = '';
+  let fileName = '';
+
+  if (language === 'javascript') {
+    fileName = path.join(tempDir, `${safeId}_run.js`);
+    command = `node "${fileName}"`;
+  } else if (language === 'python') {
+    fileName = path.join(tempDir, `${safeId}_run.py`);
+    command = `python "${fileName}"`;
+  } else {
+    callback({ output: `Language '${language}' is not available for local execution.` });
+    return;
+  }
+
+  fs.writeFileSync(fileName, code);
+
+  exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+    const output = error ? (stderr || error.message) : stdout;
+    callback({ output: output || 'Program finished with no output.' });
+    fs.unlink(fileName, () => {});
   });
 }
 
@@ -71,7 +134,7 @@ wss.on('connection', (ws) => {
           if (profSocket && profSocket.readyState === 1) {
             profSocket.send(JSON.stringify({
               type: 'STUDENT_STREAM',
-              payload: { rollNumber: userSession.rollNumber, delta: payload }
+              payload: { rollNumber: userSession.rollNumber, delta: payload.code || payload, language: payload.language || '' }
             }));
           }
         }
@@ -144,44 +207,37 @@ wss.on('connection', (ws) => {
         const { language, code } = payload;
         const safeId = userSession.rollNumber;
 
-        let command = '';
-        let fileName = '';
-
-        if (language === 'javascript' || language === 'html') {
-          fileName = path.join(tempDir, `${safeId}_run.js`);
-          command = `node "${fileName}"`;
-        } else if (language === 'python') {
-          fileName = path.join(tempDir, `${safeId}_run.py`);
-          command = `python "${fileName}"`;
-        } else {
-          ws.send(JSON.stringify({
+        if (language === 'html') {
+          const resultPacket = JSON.stringify({
             type: 'EXECUTION_RESULT',
-            payload: { rollNumber: safeId, output: `Language '${language}' is disabled in Local MVP mode. Please use Python or JavaScript.` }
-          }));
+            payload: { rollNumber: safeId, output: 'HTML preview rendered on client.' }
+          });
+          ws.send(resultPacket);
           return;
         }
 
-        fs.writeFileSync(fileName, code);
-
-        exec(command, { timeout: 5000 }, (error, stdout, stderr) => {
-          const output = error ? (stderr || error.message) : stdout;
-
+        const sendResult = (result) => {
           const resultPacket = JSON.stringify({
             type: 'EXECUTION_RESULT',
-            payload: { rollNumber: safeId, output: output || 'Program finished with no output.' }
+            payload: { rollNumber: safeId, output: result.output }
           });
-
           ws.send(resultPacket);
-
           if (lobbies[currentLobby]) {
             const profSocket = lobbies[currentLobby].professor;
             if (profSocket && profSocket.readyState === 1) {
               profSocket.send(resultPacket);
             }
           }
+        };
 
-          fs.unlink(fileName, () => {});
-        });
+        if (language === 'python' || language === 'javascript') {
+          executeLocally(language, code, safeId, sendResult);
+        } else if (PISTON_LANGS[language]) {
+          const result = await executeViaPiston(language, code);
+          sendResult(result);
+        } else {
+          sendResult({ output: `Language '${language}' is not supported.` });
+        }
       }
 
     } catch (err) {
