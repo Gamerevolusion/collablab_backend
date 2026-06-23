@@ -67,16 +67,18 @@ async function executeViaPiston(language, code) {
   }
 }
 
-function executeLocally(language, code, safeId, callback) {
-  let command = '';
+const { spawn } = require('child_process');
+
+function executeLocally(language, code, stdin, safeId, callback) {
+  let executable = '';
   let fileName = '';
 
   if (language === 'javascript') {
     fileName = path.join(tempDir, `${safeId}_run.js`);
-    command = `node "${fileName}"`;
+    executable = 'node';
   } else if (language === 'python') {
     fileName = path.join(tempDir, `${safeId}_run.py`);
-    command = `python "${fileName}"`;
+    executable = 'python';
   } else {
     callback({ output: `Language '${language}' is not available for local execution.` });
     return;
@@ -84,17 +86,37 @@ function executeLocally(language, code, safeId, callback) {
 
   fs.writeFileSync(fileName, code);
 
-  const child = exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
-    const output = error ? (stderr || error.message) : stdout;
-    callback({ output: output || 'Program finished with no output.' });
-    fs.unlink(fileName, () => { });
+  const child = spawn(executable, [fileName], { shell: false });
+
+  let outputStr = '';
+  let errorStr = '';
+
+  child.stdout.on('data', (data) => { outputStr += data.toString(); });
+  child.stderr.on('data', (data) => { errorStr += data.toString(); });
+
+  child.on('close', (code) => {
+    fs.unlink(fileName, () => {});
+    const finalOutput = errorStr ? (errorStr) : outputStr;
+    callback({ output: finalOutput || 'Program finished with no output.' });
   });
+
+  child.on('error', (err) => {
+    fs.unlink(fileName, () => {});
+    callback({ output: `Failed to start process: ${err.message}` });
+  });
+
+  // Handle timeout manually
+  const timeoutId = setTimeout(() => {
+    child.kill('SIGKILL');
+    callback({ output: 'Execution timed out (10s limit).' });
+  }, 10000);
+
+  child.on('close', () => clearTimeout(timeoutId));
 
   if (stdin) {
     child.stdin.write(stdin);
-    child.stdin.end();
   }
-});
+  child.stdin.end();
 }
 
 wss.on('connection', (ws) => {
