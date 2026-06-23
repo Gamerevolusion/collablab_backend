@@ -47,6 +47,7 @@ async function executeViaPiston(language, code) {
         language: config.language,
         version: config.version,
         files: [{ name: config.filename, content: code }],
+        stdin: stdin || "",
       }),
     });
 
@@ -83,11 +84,17 @@ function executeLocally(language, code, safeId, callback) {
 
   fs.writeFileSync(fileName, code);
 
-  exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+  const child = exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
     const output = error ? (stderr || error.message) : stdout;
     callback({ output: output || 'Program finished with no output.' });
-    fs.unlink(fileName, () => {});
+    fs.unlink(fileName, () => { });
   });
+
+  if (stdin) {
+    child.stdin.write(stdin);
+    child.stdin.end();
+  }
+});
 }
 
 wss.on('connection', (ws) => {
@@ -204,7 +211,7 @@ wss.on('connection', (ws) => {
       if (type === 'EXECUTE_CODE') {
         if (!currentLobby || userSession.role !== 'student') return;
 
-        const { language, code } = payload;
+        const { language, code, stdin } = payload;
         const safeId = userSession.rollNumber;
 
         if (language === 'html') {
@@ -231,9 +238,9 @@ wss.on('connection', (ws) => {
         };
 
         if (language === 'python' || language === 'javascript') {
-          executeLocally(language, code, safeId, sendResult);
+          executeLocally(language, code, stdin, safeId, sendResult);
         } else if (PISTON_LANGS[language]) {
-          const result = await executeViaPiston(language, code);
+          const result = await executeViaPiston(language, code, stdin);
           sendResult(result);
         } else {
           sendResult({ output: `Language '${language}' is not supported.` });
