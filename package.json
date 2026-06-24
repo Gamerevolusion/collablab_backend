@@ -7,11 +7,16 @@
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["websocket", "collaborative-coding", "education"],
+  "keywords": [
+    "websocket",
+    "collaborative-coding",
+    "education"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "firebase-admin": "^14.0.0",
     "ws": "^8.21.0"
   }
 }

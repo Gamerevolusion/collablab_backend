@@ -3,8 +3,75 @@ const http = require('http');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const admin = require('firebase-admin');
 
-const server = http.createServer();
+// Initialize Firebase Admin SDK
+// Make sure to set FIREBASE_SERVICE_ACCOUNT in your environment variables
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('Firebase Admin SDK initialized successfully.');
+  } catch (error) {
+    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT:', error);
+  }
+} else {
+  console.warn('FIREBASE_SERVICE_ACCOUNT environment variable is not set. Admin SDK not initialized.');
+}
+
+const server = http.createServer((req, res) => {
+  // CORS Headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.url === '/api/delete-user' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', async () => {
+      try {
+        const { uid } = JSON.parse(body);
+        if (!uid) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'UID is required' }));
+          return;
+        }
+
+        if (!admin.apps.length) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Firebase Admin SDK is not configured on the server.' }));
+          return;
+        }
+
+        await admin.auth().deleteUser(uid);
+        console.log(`Successfully deleted user auth for ${uid}`);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'User authentication deleted' }));
+      } catch (error) {
+        console.error('Error deleting user auth:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: error.message }));
+      }
+    });
+    return;
+  }
+
+  // Handle other HTTP routes if needed
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not Found');
+});
+
 const wss = new WebSocketServer({ server });
 
 const lobbies = {};
@@ -163,7 +230,12 @@ wss.on('connection', (ws) => {
           if (profSocket && profSocket.readyState === 1) {
             profSocket.send(JSON.stringify({
               type: 'STUDENT_STREAM',
-              payload: { rollNumber: userSession.rollNumber, delta: payload.code || payload, language: payload.language || '' }
+              payload: {
+                rollNumber: userSession.rollNumber,
+                delta: payload.code || payload,
+                language: payload.language || '',
+                fileName: payload.fileName || 'main',
+              }
             }));
           }
         }
