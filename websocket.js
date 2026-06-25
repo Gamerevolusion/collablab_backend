@@ -90,7 +90,7 @@ async function executeViaDocker(language, code, stdin) {
       'sh', '-c', shellCmd
     ];
 
-    const child = spawn('docker', dockerArgs);
+    const child = spawn('docker', dockerArgs, { shell: true });
     let outputStr = '';
     let errStr = '';
 
@@ -258,6 +258,15 @@ function initializeWebSockets(server, admin) {
 
           const { language, code, stdin } = payload;
           const safeId = sanitizeId(userSession.rollNumber);
+
+          if (language === 'html') {
+            const resultPacket = JSON.stringify({
+              type: 'EXECUTION_RESULT',
+              payload: { rollNumber: safeId, output: 'HTML preview rendered on client.' }
+            });
+            ws.send(resultPacket);
+            return;
+          }
 
           const resultPacket = JSON.stringify({
             type: 'EXECUTION_RESULT',
