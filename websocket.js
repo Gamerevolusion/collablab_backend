@@ -48,7 +48,7 @@ const DOCKER_LANGS = {
     cmd: (file) => `apk add --no-cache sqlite && sqlite3 < ${file}`
   },
   java: {
-    image: 'openjdk:17-alpine',
+    image: 'eclipse-temurin:17-alpine',
     ext: '.java',
     cmd: (file) => `javac ${file} && java Main`
   }
@@ -128,9 +128,9 @@ function initializeWebSockets(server, admin) {
   function broadcastToStudents(lobbyCode, message) {
     if (!lobbies[lobbyCode]) return;
     const packet = JSON.stringify(message);
-    Object.values(lobbies[lobbyCode].students).forEach(studentWs => {
-      if (studentWs.readyState === 1) {
-        studentWs.send(packet);
+    Object.values(lobbies[lobbyCode].students).forEach(studentData => {
+      if (studentData.ws && studentData.ws.readyState === 1) {
+        studentData.ws.send(packet);
       }
     });
   }
@@ -145,7 +145,7 @@ function initializeWebSockets(server, admin) {
         const { type, lobbyCode, payload } = packet;
 
         if (type === 'JOIN_ROOM') {
-          const { rollNumber, role } = payload;
+          const { rollNumber, role, name } = payload;
           
           if (!lobbies[lobbyCode]) {
             lobbies[lobbyCode] = { professor: null, students: {} };
@@ -157,21 +157,22 @@ function initializeWebSockets(server, admin) {
             lobbies[lobbyCode].professor = ws;
             console.log(`Professor joined lobby: ${lobbyCode}`);
             Object.keys(lobbies[lobbyCode].students).forEach(studentRoll => {
+              const studentData = lobbies[lobbyCode].students[studentRoll];
               ws.send(JSON.stringify({
                 type: 'STUDENT_CONNECTED',
-                payload: { rollNumber: studentRoll }
+                payload: { rollNumber: studentRoll, name: studentData.name }
               }));
             });
           } else {
             const safeRoll = sanitizeId(rollNumber);
-            lobbies[lobbyCode].students[safeRoll] = ws;
-            console.log(`Student ${safeRoll} joined lobby: ${lobbyCode}`);
+            lobbies[lobbyCode].students[safeRoll] = { ws, name: name || safeRoll };
+            console.log(`Student ${safeRoll} (${name}) joined lobby: ${lobbyCode}`);
             
             const profSocket = lobbies[lobbyCode].professor;
             if (profSocket && profSocket.readyState === 1) {
               profSocket.send(JSON.stringify({
                 type: 'STUDENT_CONNECTED',
-                payload: { rollNumber: safeRoll }
+                payload: { rollNumber: safeRoll, name: name || safeRoll }
               }));
             }
           }
@@ -209,7 +210,7 @@ function initializeWebSockets(server, admin) {
           const targetRoll = sanitizeId(payload.rollNumber);
 
           if (userSession.role === 'professor') {
-            const studentSocket = lobbies[currentLobby].students[targetRoll];
+            const studentSocket = lobbies[currentLobby].students[targetRoll]?.ws;
             if (studentSocket && studentSocket.readyState === 1) {
               studentSocket.send(JSON.stringify({
                 type: 'HAND_LOWER',
@@ -256,15 +257,20 @@ function initializeWebSockets(server, admin) {
           if (!currentLobby || userSession.role !== 'student') return;
 
           const { language, code, stdin } = payload;
-          const safeId = userSession.rollNumber;
+          const safeId = sanitizeId(userSession.rollNumber);
 
-          if (language === 'html') {
-            const resultPacket = JSON.stringify({
-              type: 'EXECUTION_RESULT',
-              payload: { rollNumber: safeId, output: 'HTML preview rendered on client.' }
-            });
-            ws.send(resultPacket);
-            return;
+          const resultPacket = JSON.stringify({
+            type: 'EXECUTION_RESULT',
+            payload: { rollNumber: safeId, output: 'Running...' }
+          });
+          ws.send(resultPacket);
+
+          if (lobbies[currentLobby]) {
+            const profSocket = lobbies[currentLobby].professor;
+            if (profSocket && profSocket.readyState === 1) {
+              console.log(`Executing ${language} for student ${safeId} in lobby ${currentLobby}`);
+              profSocket.send(resultPacket);
+            }
           }
 
           const sendResult = (result) => {
