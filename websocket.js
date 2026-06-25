@@ -46,6 +46,11 @@ const DOCKER_LANGS = {
     image: 'alpine:latest',
     ext: '.sql',
     cmd: (file) => `apk add --no-cache sqlite && sqlite3 < ${file}`
+  },
+  java: {
+    image: 'openjdk:17-alpine',
+    ext: '.java',
+    cmd: (file) => `javac ${file} && java Main`
   }
 };
 
@@ -58,7 +63,7 @@ async function executeViaDocker(language, code, stdin) {
     const execDir = path.join(tempExecDir, execId);
     fs.mkdirSync(execDir, { recursive: true });
 
-    const codeFile = `main${config.ext}`;
+    const codeFile = language === 'java' ? 'Main.java' : `main${config.ext}`;
     const codePath = path.join(execDir, codeFile);
     fs.writeFileSync(codePath, code);
 
