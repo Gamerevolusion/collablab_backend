@@ -9,7 +9,7 @@ function sanitizeId(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-const PISTON_URL = 'https://emkc.org/api/v2/piston/execute';
+const PISTON_URL = process.env.PISTON_URL || 'http://localhost:2000/api/v2/execute';
 
 const PISTON_LANGS = {
   c: { language: 'c', version: '10.2.0', filename: 'main.c' },
