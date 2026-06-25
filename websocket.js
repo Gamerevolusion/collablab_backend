@@ -1,4 +1,8 @@
 const { WebSocketServer } = require('ws');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
@@ -48,8 +52,59 @@ async function executeViaPiston(language, code, stdin) {
     }
     return { output: runOutput.stdout || 'Program finished with no output.' };
   } catch (err) {
-    return { output: `Execution service unavailable: ${err.message}.` };
+    console.warn(`Piston unavailable (${err.message}). Falling back to local execution for ${language}...`);
+    return await executeLocallyFallback(language, code, stdin);
   }
+}
+
+async function executeLocallyFallback(language, code, stdin) {
+  return new Promise((resolve) => {
+    if (language !== 'javascript' && language !== 'python') {
+      return resolve({ output: `Local fallback failed: Cannot execute ${language} locally. Please run Docker Piston API.` });
+    }
+
+    const tempDir = os.tmpdir();
+    const fileName = language === 'python' ? 'temp.py' : 'temp.js';
+    const filePath = path.join(tempDir, fileName);
+
+    try {
+      fs.writeFileSync(filePath, code);
+    } catch (e) {
+      return resolve({ output: `Error writing temp file: ${e.message}` });
+    }
+
+    const cmd = language === 'python' ? 'python' : 'node';
+    const child = spawn(cmd, [filePath]);
+    let outputStr = '';
+    let errStr = '';
+
+    if (stdin) {
+      child.stdin.write(stdin);
+      child.stdin.end();
+    }
+
+    child.stdout.on('data', (data) => {
+      outputStr += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      errStr += data.toString();
+    });
+
+    child.on('close', (codeStatus) => {
+      try { fs.unlinkSync(filePath); } catch(e){}
+      if (errStr.trim()) {
+        resolve({ output: errStr });
+      } else {
+        resolve({ output: outputStr || 'Program finished with no output.' });
+      }
+    });
+
+    child.on('error', (err) => {
+      try { fs.unlinkSync(filePath); } catch(e){}
+      resolve({ output: `Local execution error: ${err.message}. Is ${cmd} installed?` });
+    });
+  });
 }
 
 function initializeWebSockets(server, admin) {
