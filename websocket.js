@@ -13,75 +13,82 @@ function sanitizeId(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
-const PISTON_URL = process.env.PISTON_URL || 'http://localhost:2000/api/v2/execute';
+const crypto = require('crypto');
+const tempExecDir = path.join(__dirname, 'temp_executions');
+if (!fs.existsSync(tempExecDir)) fs.mkdirSync(tempExecDir);
 
-const PISTON_LANGS = {
-  c: { language: 'c', version: '10.2.0', filename: 'main.c' },
-  cpp: { language: 'c++', version: '10.2.0', filename: 'main.cpp' },
-  r: { language: 'r', version: '4.1.1', filename: 'main.r' },
-  sql: { language: 'sqlite3', version: '3.36.0', filename: 'main.sql' },
-  python: { language: 'python', version: '3.10.0', filename: 'main.py' },
-  javascript: { language: 'javascript', version: '18.15.0', filename: 'main.js' },
+const DOCKER_LANGS = {
+  javascript: {
+    image: 'node:18-alpine',
+    ext: '.js',
+    cmd: (file) => `node ${file}`
+  },
+  python: {
+    image: 'python:3.10-alpine',
+    ext: '.py',
+    cmd: (file) => `python ${file}`
+  },
+  c: {
+    image: 'gcc:12',
+    ext: '.c',
+    cmd: (file) => `gcc ${file} -o out && ./out`
+  },
+  cpp: {
+    image: 'gcc:12',
+    ext: '.cpp',
+    cmd: (file) => `g++ ${file} -o out && ./out`
+  },
+  r: {
+    image: 'r-base:4',
+    ext: '.R',
+    cmd: (file) => `Rscript ${file}`
+  },
+  sql: {
+    image: 'alpine:latest',
+    ext: '.sql',
+    cmd: (file) => `apk add --no-cache sqlite && sqlite3 < ${file}`
+  }
 };
 
-async function executeViaPiston(language, code, stdin) {
-  const config = PISTON_LANGS[language];
-  if (!config) return { output: `Language '${language}' is not supported via Piston.` };
-
-  try {
-    const response = await fetch(PISTON_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        language: config.language,
-        version: config.version,
-        files: [{ name: config.filename, content: code }],
-        stdin: stdin || "",
-      }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      return { output: `Piston API error (${response.status}): ${text}` };
-    }
-
-    const result = await response.json();
-    const runOutput = result.run || {};
-    if (runOutput.stderr && runOutput.stderr.trim()) {
-      return { output: runOutput.stderr };
-    }
-    return { output: runOutput.stdout || 'Program finished with no output.' };
-  } catch (err) {
-    console.warn(`Piston unavailable (${err.message}). Falling back to local execution for ${language}...`);
-    return await executeLocallyFallback(language, code, stdin);
-  }
-}
-
-async function executeLocallyFallback(language, code, stdin) {
+async function executeViaDocker(language, code, stdin) {
   return new Promise((resolve) => {
-    if (language !== 'javascript' && language !== 'python') {
-      return resolve({ output: `Local fallback failed: Cannot execute ${language} locally. Please run Docker Piston API.` });
+    const config = DOCKER_LANGS[language];
+    if (!config) return resolve({ output: `Language '${language}' is not supported.` });
+
+    const execId = crypto.randomUUID();
+    const execDir = path.join(tempExecDir, execId);
+    fs.mkdirSync(execDir, { recursive: true });
+
+    const codeFile = `main${config.ext}`;
+    const codePath = path.join(execDir, codeFile);
+    fs.writeFileSync(codePath, code);
+
+    const inputPath = path.join(execDir, 'input.txt');
+    fs.writeFileSync(inputPath, stdin || '');
+
+    // Convert Windows paths correctly if necessary
+    let volumePath = path.resolve(execDir);
+    if (os.platform() === 'win32') {
+      volumePath = volumePath.replace(/\\/g, '/');
+      volumePath = '/' + volumePath.replace(':', '');
     }
+    
+    // Command: cd /app && (cmd) < input.txt
+    const shellCmd = `cd /app && ${config.cmd(codeFile)} < input.txt`;
 
-    const tempDir = os.tmpdir();
-    const fileName = language === 'python' ? 'temp.py' : 'temp.js';
-    const filePath = path.join(tempDir, fileName);
+    const dockerArgs = [
+      'run', '--rm', '-i',
+      '--net', 'none', // Block internet access
+      '--memory', '100m', // Restrict memory
+      '-v', `${volumePath}:/app`,
+      '-w', '/app',
+      config.image,
+      'sh', '-c', shellCmd
+    ];
 
-    try {
-      fs.writeFileSync(filePath, code);
-    } catch (e) {
-      return resolve({ output: `Error writing temp file: ${e.message}` });
-    }
-
-    const cmd = language === 'python' ? 'python' : 'node';
-    const child = spawn(cmd, [filePath]);
+    const child = spawn('docker', dockerArgs);
     let outputStr = '';
     let errStr = '';
-
-    if (stdin) {
-      child.stdin.write(stdin);
-      child.stdin.end();
-    }
 
     child.stdout.on('data', (data) => {
       outputStr += data.toString();
@@ -92,8 +99,11 @@ async function executeLocallyFallback(language, code, stdin) {
     });
 
     child.on('close', (codeStatus) => {
-      try { fs.unlinkSync(filePath); } catch(e){}
-      if (errStr.trim()) {
+      // Cleanup temp directory
+      try { fs.rmSync(execDir, { recursive: true, force: true }); } catch(e){}
+      
+      // Sometimes Docker prints image pull logs to stderr, filter them out if needed.
+      if (errStr.trim() && !errStr.includes('Unable to find image')) {
         resolve({ output: errStr });
       } else {
         resolve({ output: outputStr || 'Program finished with no output.' });
@@ -101,8 +111,8 @@ async function executeLocallyFallback(language, code, stdin) {
     });
 
     child.on('error', (err) => {
-      try { fs.unlinkSync(filePath); } catch(e){}
-      resolve({ output: `Local execution error: ${err.message}. Is ${cmd} installed?` });
+      try { fs.rmSync(execDir, { recursive: true, force: true }); } catch(e){}
+      resolve({ output: `Docker execution error: ${err.message}. Is Docker installed and running?` });
     });
   });
 }
@@ -262,12 +272,13 @@ function initializeWebSockets(server, admin) {
             if (lobbies[currentLobby]) {
               const profSocket = lobbies[currentLobby].professor;
               if (profSocket && profSocket.readyState === 1) {
+                console.log(`Executing ${language} for student ${safeId} in lobby ${currentLobby}`);
                 profSocket.send(resultPacket);
               }
             }
           };
 
-          const result = await executeViaPiston(language, code, stdin);
+          const result = await executeViaDocker(language, code, stdin);
           sendResult(result);
         }
 
