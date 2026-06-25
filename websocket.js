@@ -3,8 +3,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const fs = require('fs');
-const path = require('path');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
