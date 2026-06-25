@@ -38,7 +38,7 @@ const DOCKER_LANGS = {
     cmd: (file) => `g++ ${file} -o out && ./out`
   },
   r: {
-    image: 'r-base:4',
+    image: 'r-base:latest',
     ext: '.R',
     cmd: (file) => `Rscript ${file}`
   },
