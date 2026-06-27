@@ -90,7 +90,7 @@ async function executeViaDocker(language, code, stdin) {
       'sh', '-c', shellCmd
     ];
 
-    const child = spawn('docker', dockerArgs, { shell: true });
+    const child = spawn('docker', dockerArgs);
     let outputStr = '';
     let errStr = '';
 
@@ -151,7 +151,8 @@ function initializeWebSockets(server, admin) {
             lobbies[lobbyCode] = { professor: null, students: {} };
           }
           currentLobby = lobbyCode;
-          userSession = { rollNumber, role };
+          const safeRollNumber = role === 'student' ? sanitizeId(rollNumber) : rollNumber;
+          userSession = { rollNumber: safeRollNumber, role };
 
           if (role === 'professor') {
             lobbies[lobbyCode].professor = ws;
@@ -164,15 +165,14 @@ function initializeWebSockets(server, admin) {
               }));
             });
           } else {
-            const safeRoll = sanitizeId(rollNumber);
-            lobbies[lobbyCode].students[safeRoll] = { ws, name: name || safeRoll };
-            console.log(`Student ${safeRoll} (${name}) joined lobby: ${lobbyCode}`);
+            lobbies[lobbyCode].students[safeRollNumber] = { ws, name: name || safeRollNumber };
+            console.log(`Student ${safeRollNumber} (${name}) joined lobby: ${lobbyCode}`);
             
             const profSocket = lobbies[lobbyCode].professor;
             if (profSocket && profSocket.readyState === 1) {
               profSocket.send(JSON.stringify({
                 type: 'STUDENT_CONNECTED',
-                payload: { rollNumber: safeRoll, name: name || safeRoll }
+                payload: { rollNumber: safeRollNumber, name: name || safeRollNumber }
               }));
             }
           }
@@ -257,7 +257,7 @@ function initializeWebSockets(server, admin) {
           if (!currentLobby || userSession.role !== 'student') return;
 
           const { language, code, stdin } = payload;
-          const safeId = sanitizeId(userSession.rollNumber);
+          const safeId = userSession.rollNumber; // already sanitized at join time
 
           if (language === 'html') {
             const resultPacket = JSON.stringify({
