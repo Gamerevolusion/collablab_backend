@@ -337,7 +337,7 @@ function initializeWebSockets(server, admin) {
             if (!sessionQuery.empty) {
               const sessionDoc = sessionQuery.docs[0];
               await sessionDoc.ref.update({
-                endedAt: admin.firestore.FieldValue.serverTimestamp()
+                endedAt: FieldValue.serverTimestamp()
               });
               console.log(`Automatically ended session ${currentLobby} in Firestore.`);
             }
