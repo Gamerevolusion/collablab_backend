@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
-const admin = require('firebase-admin');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
 const { initializeWebSockets } = require('./websocket');
 
 const app = express();
@@ -32,8 +33,8 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 if (serviceAccount) {
   try {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+    initializeApp({
+      credential: cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully.');
   } catch (error) {
@@ -56,10 +57,10 @@ app.delete('/api/delete-user', async (req, res) => {
     if (!uid) {
       return res.status(400).json({ error: 'UID is required' });
     }
-    if (!admin.apps.length) {
+    if (!getApps().length) {
       return res.status(500).json({ error: 'Firebase Admin SDK is not configured on the server.' });
     }
-    await admin.auth().deleteUser(uid);
+    await getAuth().deleteUser(uid);
     console.log(`Successfully deleted user auth for ${uid}`);
     res.json({ success: true, message: 'User authentication deleted' });
   } catch (error) {
@@ -68,7 +69,7 @@ app.delete('/api/delete-user', async (req, res) => {
   }
 });
 
-initializeWebSockets(server, admin);
+initializeWebSockets(server);
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => console.log(`CollabLab Gateway Server running on port ${PORT}`));
