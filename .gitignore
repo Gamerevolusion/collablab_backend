@@ -3,6 +3,7 @@ node_modules
 
 # Temp execution files
 temp/
+temp_executions/
 
 # Environment
 .env
