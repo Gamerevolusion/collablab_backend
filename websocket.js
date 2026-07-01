@@ -28,6 +28,8 @@ const MAX_CODE_SIZE = 100 * 1024; // 100KB
 const DOCKER_TIMEOUT_MS = 15000; // 15 seconds
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX_MESSAGES = 20;
+const HEARTBEAT_INTERVAL_MS = 25000; // 25 seconds
+const PROFESSOR_GRACE_PERIOD_MS = 30000; // 30 seconds
 
 const DOCKER_LANGS = {
   javascript: {
@@ -185,6 +187,25 @@ function initializeWebSockets(server) {
   const wss = new WebSocketServer({ server });
   const lobbies = {};
 
+  // Track professor grace period timers
+  const professorGraceTimers = {};
+
+  // --- Heartbeat: detect and clean up dead connections ---
+  const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws._isAlive === false) {
+        // Connection didn't respond to the last ping — terminate it
+        return ws.terminate();
+      }
+      ws._isAlive = false;
+      ws.ping();
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+
+  wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
+
   function broadcastToStudents(lobbyCode, message) {
     if (!lobbies[lobbyCode]) return;
     const packet = JSON.stringify(message);
@@ -199,6 +220,10 @@ function initializeWebSockets(server) {
     let currentLobby = null;
     let userSession = null;
     let authenticated = false;
+
+    // Mark connection as alive for heartbeat
+    ws._isAlive = true;
+    ws.on('pong', () => { ws._isAlive = true; });
 
     // MED-1: Rate limiting per connection
     let messageCount = 0;
@@ -274,8 +299,16 @@ function initializeWebSockets(server) {
           userSession = { rollNumber: safeRollNumber, role: verifiedRole };
 
           if (verifiedRole === 'professor') {
+            // Cancel any pending grace period timer for this lobby
+            if (professorGraceTimers[lobbyCode]) {
+              clearTimeout(professorGraceTimers[lobbyCode]);
+              delete professorGraceTimers[lobbyCode];
+              console.log(`Professor reconnected to lobby ${lobbyCode} within grace period.`);
+            }
+
             lobbies[lobbyCode].professor = ws;
             console.log(`Professor joined lobby: ${lobbyCode}`);
+            // Send current roster to professor
             Object.keys(lobbies[lobbyCode].students).forEach(studentRoll => {
               const studentData = lobbies[lobbyCode].students[studentRoll];
               ws.send(JSON.stringify({
@@ -284,6 +317,15 @@ function initializeWebSockets(server) {
               }));
             });
           } else {
+            // --- Deduplicate: if this rollNumber already has an active connection, close the old one ---
+            const existingStudent = lobbies[lobbyCode].students[safeRollNumber];
+            if (existingStudent && existingStudent.ws && existingStudent.ws.readyState === 1) {
+              console.log(`Replacing stale connection for student ${safeRollNumber} in lobby ${lobbyCode}`);
+              // Prevent the old connection's close handler from broadcasting STUDENT_DISCONNECTED
+              existingStudent.ws._replaced = true;
+              existingStudent.ws.close();
+            }
+
             lobbies[lobbyCode].students[safeRollNumber] = { ws, name: verifiedName || safeRollNumber };
             console.log(`Student ${safeRollNumber} (${verifiedName}) joined lobby: ${lobbyCode}`);
             
@@ -298,7 +340,7 @@ function initializeWebSockets(server) {
         }
 
         if (type === 'SYNC_UPDATE') {
-          if (!currentLobby || userSession.role !== 'student') return;
+          if (!currentLobby || !lobbies[currentLobby] || userSession.role !== 'student') return;
           const profSocket = lobbies[currentLobby].professor;
           if (profSocket && profSocket.readyState === 1) {
             profSocket.send(JSON.stringify({
@@ -314,7 +356,7 @@ function initializeWebSockets(server) {
         }
 
         if (type === 'HAND_RAISE') {
-          if (!currentLobby || userSession.role !== 'student') return;
+          if (!currentLobby || !lobbies[currentLobby] || userSession.role !== 'student') return;
           const profSocket = lobbies[currentLobby].professor;
           if (profSocket && profSocket.readyState === 1) {
             profSocket.send(JSON.stringify({
@@ -375,7 +417,7 @@ function initializeWebSockets(server) {
         }
 
         if (type === 'EXECUTE_CODE') {
-          if (!currentLobby || userSession.role !== 'student') return;
+          if (!currentLobby || !lobbies[currentLobby] || userSession.role !== 'student') return;
 
           const { language, code, stdin } = payload;
           const safeId = userSession.rollNumber; // already sanitized at join time
@@ -389,17 +431,17 @@ function initializeWebSockets(server) {
             return;
           }
 
-          const resultPacket = JSON.stringify({
+          const runningPacket = JSON.stringify({
             type: 'EXECUTION_RESULT',
             payload: { rollNumber: safeId, output: 'Running...' }
           });
-          ws.send(resultPacket);
+          ws.send(runningPacket);
 
           if (lobbies[currentLobby]) {
             const profSocket = lobbies[currentLobby].professor;
             if (profSocket && profSocket.readyState === 1) {
               console.log(`Executing ${language} for student ${safeId} in lobby ${currentLobby}`);
-              profSocket.send(resultPacket);
+              profSocket.send(runningPacket);
             }
           }
 
@@ -408,7 +450,7 @@ function initializeWebSockets(server) {
               type: 'EXECUTION_RESULT',
               payload: { rollNumber: safeId, output: result.output }
             });
-            ws.send(resultPacket);
+            if (ws.readyState === 1) ws.send(resultPacket);
             if (lobbies[currentLobby]) {
               const profSocket = lobbies[currentLobby].professor;
               if (profSocket && profSocket.readyState === 1) {
@@ -431,6 +473,9 @@ function initializeWebSockets(server) {
       if (!currentLobby || !lobbies[currentLobby]) return;
 
       if (userSession && userSession.role === 'student') {
+        // If this connection was replaced by a newer one, don't broadcast disconnect
+        if (ws._replaced) return;
+
         delete lobbies[currentLobby].students[userSession.rollNumber];
         if (lobbies[currentLobby].professor && lobbies[currentLobby].professor.readyState === 1) {
           lobbies[currentLobby].professor.send(JSON.stringify({
@@ -439,35 +484,60 @@ function initializeWebSockets(server) {
           }));
         }
       } else if (userSession && userSession.role === 'professor') {
-        console.log(`Professor left lobby: ${currentLobby}`);
-        broadcastToStudents(currentLobby, {
-          type: 'ERROR',
-          payload: 'The professor has ended this session. Please rejoin later.'
-        });
+        console.log(`Professor disconnected from lobby: ${currentLobby}. Starting ${PROFESSOR_GRACE_PERIOD_MS / 1000}s grace period...`);
         
-        // HIGH-2: Fixed — use getApps() instead of undefined admin.apps
-        if (getApps().length > 0) {
-          try {
-            const db = getFirestore();
-            const sessionQuery = await db.collection('sessions')
-              .where('lobbyCode', '==', currentLobby)
-              .where('endedAt', '==', null)
-              .limit(1)
-              .get();
-              
-            if (!sessionQuery.empty) {
-              const sessionDoc = sessionQuery.docs[0];
-              await sessionDoc.ref.update({
-                endedAt: FieldValue.serverTimestamp()
-              });
-              console.log(`Automatically ended session ${currentLobby} in Firestore.`);
-            }
-          } catch (err) {
-            console.error('Failed to update session endedAt in Firestore:', err);
+        // Remove the professor socket reference but DON'T destroy the lobby yet
+        lobbies[currentLobby].professor = null;
+
+        // Start a grace period timer
+        const lobbyToClean = currentLobby;
+        professorGraceTimers[lobbyToClean] = setTimeout(async () => {
+          delete professorGraceTimers[lobbyToClean];
+
+          // Check if a professor has reconnected during the grace period
+          if (lobbies[lobbyToClean] && lobbies[lobbyToClean].professor) {
+            console.log(`Professor already reconnected to ${lobbyToClean}, skipping cleanup.`);
+            return;
           }
-        }
-        
-        delete lobbies[currentLobby];
+
+          console.log(`Grace period expired for lobby ${lobbyToClean}. Ending session.`);
+          
+          // Now broadcast the session ended message and clean up
+          if (lobbies[lobbyToClean]) {
+            broadcastToStudents(lobbyToClean, {
+              type: 'ERROR',
+              payload: 'The professor has ended this session. Please rejoin later.'
+            });
+          }
+
+          // Update Firestore
+          if (getApps().length > 0) {
+            try {
+              const db = getFirestore();
+              const sessionQuery = await db.collection('sessions')
+                .where('lobbyCode', '==', lobbyToClean)
+                .where('endedAt', '==', null)
+                .limit(1)
+                .get();
+                
+              if (!sessionQuery.empty) {
+                const sessionDoc = sessionQuery.docs[0];
+                const studentCount = lobbies[lobbyToClean]
+                  ? Object.keys(lobbies[lobbyToClean].students).length
+                  : 0;
+                await sessionDoc.ref.update({
+                  endedAt: FieldValue.serverTimestamp(),
+                  studentCount: studentCount,
+                });
+                console.log(`Ended session ${lobbyToClean} in Firestore (${studentCount} students).`);
+              }
+            } catch (err) {
+              console.error('Failed to update session endedAt in Firestore:', err);
+            }
+          }
+          
+          delete lobbies[lobbyToClean];
+        }, PROFESSOR_GRACE_PERIOD_MS);
       }
     });
   });

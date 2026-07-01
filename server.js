@@ -61,6 +61,10 @@ app.use(cors({
     if (ALLOWED_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
+    // Allow any .trycloudflare.com subdomain (for Cloudflare quick tunnels)
+    if (/^https?:\/\/[a-z0-9-]+(-[a-z0-9-]+)*\.trycloudflare\.com$/.test(origin)) {
+      return callback(null, true);
+    }
     return callback(new Error('Not allowed by CORS'));
   }
 }));
