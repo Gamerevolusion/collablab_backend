@@ -38,7 +38,7 @@ const DOCKER_LANGS = {
     cmd: (file) => `node ${file}`
   },
   python: {
-    image: 'python:3.10-alpine',
+    image: process.env.PYTHON_DOCKER_IMAGE || 'collablab-python', // Custom image with numpy, pandas, matplotlib, sklearn, seaborn
     ext: '.py',
     cmd: (file) => `python ${file}`
   },
@@ -104,10 +104,11 @@ async function executeViaDocker(language, code, stdin) {
     const dockerArgs = [
       'run', '--rm', '-i',
       '--net', 'none',           // Block internet access
-      '--memory', '100m',        // Restrict memory
+      '--memory', '350m',        // Restrict memory (350m needed for pandas/sklearn/matplotlib)
       '--pids-limit', '50',      // Prevent fork bombs
       '--cpus', '0.5',           // Prevent CPU starvation
-      '--tmpfs', '/tmp:size=10m', // Writable temp for compilation output
+      '--tmpfs', '/tmp:size=20m', // Writable temp for compilation and matplotlib caches
+      '-e', 'MPLBACKEND=Agg',    // Prevent matplotlib GUI display crashes in terminal
       '-v', `${volumePath}:/app:ro`, // Read-only mount
       '-w', '/app',
       config.image,
