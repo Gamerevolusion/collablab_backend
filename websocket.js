@@ -85,7 +85,41 @@ async function executeViaDocker(language, code, stdin) {
 
     const codeFile = language === 'java' ? 'Main.java' : `main${config.ext}`;
     const codePath = path.join(execDir, codeFile);
-    fs.writeFileSync(codePath, code);
+
+    // For Python: prepend a transparent matplotlib monkey-patch so plt.show() 
+    // encodes plots as base64 and prints them with markers for the frontend to render
+    let finalCode = code;
+    if (language === 'python') {
+      const matplotlibPatch = `
+# --- CollabLab auto-patch: makes plt.show() output inline images ---
+import sys as _sys, io as _io, base64 as _b64
+def _collablab_patch_mpl():
+    try:
+        import matplotlib as _mpl
+        _mpl.use('Agg')
+        import matplotlib.pyplot as _plt
+        _orig_show = _plt.show
+        def _patched_show(*a, **kw):
+            for _fn in _plt.get_fignums():
+                _fig = _plt.figure(_fn)
+                _buf = _io.BytesIO()
+                _fig.savefig(_buf, format='png', dpi=100, bbox_inches='tight', facecolor='#1a1a1a', edgecolor='none')
+                _buf.seek(0)
+                _enc = _b64.b64encode(_buf.read()).decode('utf-8')
+                print(f'__PLOT_BASE64__{_enc}__PLOT_END__', flush=True)
+                _buf.close()
+            _plt.close('all')
+        _plt.show = _patched_show
+    except ImportError:
+        pass
+_collablab_patch_mpl()
+del _collablab_patch_mpl
+# --- End CollabLab auto-patch ---
+`;
+      finalCode = matplotlibPatch + code;
+    }
+
+    fs.writeFileSync(codePath, finalCode);
 
     const inputPath = path.join(execDir, 'input.txt');
     fs.writeFileSync(inputPath, stdin || '');
