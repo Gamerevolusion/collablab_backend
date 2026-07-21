@@ -7,18 +7,39 @@ const { getFirestore } = require('firebase-admin/firestore');
 async function deleteAllStudents() {
   console.log('Initializing Firebase Admin...');
   let serviceAccount = null;
-  const serviceAccountPath = path.join(__dirname, 'service-account.json');
-  if (fs.existsSync(serviceAccountPath)) {
-    serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    } catch (error) {
+      console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:', error);
+    }
   } else {
-    console.error('service-account.json not found!');
-    process.exit(1);
+    const serviceAccountPath = path.join(__dirname, 'service-account.json');
+    if (fs.existsSync(serviceAccountPath)) {
+      try {
+        serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+        console.log('Loaded service account from service-account.json');
+      } catch (error) {
+        console.error('Failed to read service-account.json:', error);
+      }
+    }
   }
 
-  initializeApp({
-    credential: cert(serviceAccount)
-
-  });
+  if (serviceAccount) {
+    try {
+      initializeApp({
+        credential: cert(serviceAccount)
+      });
+      console.log('Firebase Admin SDK initialized successfully.');
+    } catch (error) {
+      console.error('Failed to initialize Firebase Admin SDK:', error);
+      process.exit(1);
+    }
+  } else {
+    console.warn('No Firebase service account provided. Admin SDK not initialized.');
+    process.exit(1);
+  }
 
   const db = getFirestore();
   const auth = getAuth();

@@ -1,18 +1,39 @@
 const admin = require('firebase-admin');
 
+let serviceAccount = null;
+
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } catch (error) {
+    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:', error);
+  }
+} else {
+  const fs = require('fs');
+  const path = require('path');
+  const serviceAccountPath = path.join(__dirname, 'service-account.json');
+  if (fs.existsSync(serviceAccountPath)) {
+    try {
+      serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+      console.log('Loaded service account from service-account.json');
+    } catch (error) {
+      console.error('Failed to read service-account.json:', error);
+    }
+  }
+}
+
+if (serviceAccount) {
+  try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully.');
   } catch (error) {
-    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT:', error);
+    console.error('Failed to initialize Firebase Admin SDK:', error);
     process.exit(1);
   }
 } else {
-  console.warn('FIREBASE_SERVICE_ACCOUNT environment variable is not set. Admin SDK not initialized.');
+  console.warn('No Firebase service account provided. Admin SDK not initialized.');
   process.exit(1);
 }
 

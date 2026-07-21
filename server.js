@@ -126,9 +126,12 @@ app.delete('/api/delete-user', async (req, res) => {
 });
 
 // CRIT-1: Server-side admin key validation
-const ADMIN_MASTER_KEY = process.env.ADMIN_MASTER_KEY || 'COLLABLAB_MASTER_2025';
+const ADMIN_MASTER_KEY = process.env.ADMIN_MASTER_KEY;
 
 app.post('/api/validate-admin-key', (req, res) => {
+  if (!ADMIN_MASTER_KEY) {
+    return res.status(500).json({ valid: false, error: 'Admin key not configured on server.' });
+  }
   const { adminKey } = req.body;
   if (!adminKey) {
     return res.status(400).json({ valid: false, error: 'Admin key is required.' });

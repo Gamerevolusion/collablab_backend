@@ -53,12 +53,12 @@ const DOCKER_LANGS = {
     cmd: (file) => `g++ ${file} -o /tmp/out && /tmp/out`
   },
   r: {
-    image: 'r-base:latest',
+    image: 'r-base:4.3.2',
     ext: '.R',
     cmd: (file) => `Rscript ${file}`
   },
   sql: {
-    image: 'alpine:latest',
+    image: 'alpine:3.19',
     ext: '.sql',
     cmd: (file) => `apk add --no-cache sqlite && sqlite3 < ${file}`
   },
@@ -122,7 +122,7 @@ del _collablab_patch_mpl
     fs.writeFileSync(codePath, finalCode);
 
     const inputPath = path.join(execDir, 'input.txt');
-    fs.writeFileSync(inputPath, stdin || '');
+    fs.writeFileSync(inputPath, (stdin || '').substring(0, 65536));
 
     // Convert Windows paths correctly if necessary
     let volumePath = path.resolve(execDir);
@@ -160,12 +160,21 @@ del _collablab_patch_mpl
       child.kill('SIGKILL');
     }, DOCKER_TIMEOUT_MS);
 
+    const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB Limit
     child.stdout.on('data', (data) => {
-      outputStr += data.toString();
+      if (outputStr.length < MAX_OUTPUT_SIZE) {
+        outputStr += data.toString();
+      } else if (!outputStr.endsWith('\\n[Output Truncated]')) {
+        outputStr += '\\n[Output Truncated]';
+      }
     });
 
     child.stderr.on('data', (data) => {
-      errStr += data.toString();
+      if (errStr.length < MAX_OUTPUT_SIZE) {
+        errStr += data.toString();
+      } else if (!errStr.endsWith('\\n[Output Truncated]')) {
+        errStr += '\\n[Output Truncated]';
+      }
     });
 
     child.on('close', (codeStatus) => {
@@ -225,6 +234,24 @@ function initializeWebSockets(server) {
   // Track professor grace period timers
   const professorGraceTimers = {};
 
+  // MED-5: Periodic temp directory cleanup (every 10 minutes)
+  const cleanupInterval = setInterval(() => {
+    try {
+      if (!fs.existsSync(tempExecDir)) return;
+      const entries = fs.readdirSync(tempExecDir);
+      entries.forEach(dir => {
+        const dirPath = path.join(tempExecDir, dir);
+        const stats = fs.statSync(dirPath);
+        // If older than 5 minutes, delete
+        if (Date.now() - stats.mtimeMs > 300000) {
+          try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch(e){}
+        }
+      });
+    } catch (e) {
+      console.error('Cleanup error:', e);
+    }
+  }, 600000);
+
   // --- Heartbeat: detect and clean up dead connections ---
   const heartbeatInterval = setInterval(() => {
     wss.clients.forEach((ws) => {
@@ -239,6 +266,7 @@ function initializeWebSockets(server) {
 
   wss.on('close', () => {
     clearInterval(heartbeatInterval);
+    clearInterval(cleanupInterval);
   });
 
   function broadcastToStudents(lobbyCode, message) {
@@ -313,6 +341,11 @@ function initializeWebSockets(server) {
         }
 
         if (type === 'JOIN_ROOM') {
+          if (typeof lobbyCode !== 'string' || !/^[A-Z0-9]{6}$/.test(lobbyCode)) {
+            ws.send(JSON.stringify({ type: 'ERROR', payload: 'Invalid lobby code format.' }));
+            return;
+          }
+
           const { rollNumber, role, name } = payload;
           
           // Use server-verified role if available, otherwise trust client (dev mode)
@@ -456,6 +489,15 @@ function initializeWebSockets(server) {
 
           const { language, code, stdin } = payload;
           const safeId = userSession.rollNumber; // already sanitized at join time
+          const student = lobbies[currentLobby].students[safeId];
+
+          if (student && student.isExecuting) {
+            ws.send(JSON.stringify({
+              type: 'EXECUTION_RESULT',
+              payload: { rollNumber: safeId, output: 'Error: An execution is already running. Please wait.' }
+            }));
+            return;
+          }
 
           if (language === 'html') {
             const resultPacket = JSON.stringify({
@@ -480,7 +522,10 @@ function initializeWebSockets(server) {
             }
           }
 
+          if (student) student.isExecuting = true;
+
           const sendResult = (result) => {
+            if (student) student.isExecuting = false;
             const resultPacket = JSON.stringify({
               type: 'EXECUTION_RESULT',
               payload: { rollNumber: safeId, output: result.output }
